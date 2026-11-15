@@ -281,6 +281,32 @@ function failureHeader(failures: FailureRow[]): Record<string, string> | undefin
  * candidates are tried: the trial caps gateway calls at 60 and OpenRouter's free tier at 20 a
  * minute, so trying all fourteen models on every prompt would burn the budget and the rate limit
  * on refusals alone, and a fourth fallback is almost never the one that answers.
+ *
+ * FAILOVER STRATEGY (why three attempts, and what each refusal means)
+ *   The entry tries at most three models per prompt. The trial allows 60 gateway calls for six
+ *   prompts, which is ten per prompt, but OpenRouter's free tier allows only 20 requests a
+ *   minute across the whole account, and the trial's six prompts arrive within seconds of each
+ *   other. Trying all fourteen models on one prompt would spend the minute's allowance on
+ *   refusals alone and leave later prompts with nothing. Three attempts is the balance: the
+ *   first is the best model that meets the requirements (usually the super-vl, which answers),
+ *   the second is the next-best working model (usually the ultra at 1285, or the lightning at
+ *   1221 for JSON), and the third is a safety net for a transient outage on the first two.
+ *   A 402 means the model's budget is spent, so it is excluded for the rest of the trial: the
+ *   free tier's daily allowance for that model is gone and retrying it only wastes a call. A
+ *   429 means the model is rate-limited right now, so it cools down for five seconds and is
+ *   skipped until then; a transient 429 clears, so the model is not excluded, only paused.
+ *   Three consecutive failures deprioritise a model (it may be in an outage) but do not exclude
+ *   it, because a model that failed three times on one prompt may still answer the next. The
+ *   inkling is gated and refuses with 403, so it sorts last and is only tried after every
+ *   working model has refused; trying it first would burn a gateway call on every prompt and
+ *   cost the six-call tie-break the top entries win on. When a prompt is served after refusals,
+ *   the response carries the x-makefun-upstream-failures header with up to eight rows, each
+ *   naming the refusal's status, code, and model, so the failover column can see the recovery.
+ *   Without that header a recovered refusal is invisible and the entry earns nothing on
+ *   failover even when it recovered correctly. A refusal that is not a 402 or a 429 (for
+ *   example a 502 from an unreachable upstream, or a 403 from the gated inkling) counts toward
+ *   the model's consecutive failures and is recorded in the trail, but it neither spends the
+ *   budget nor starts a cooldown, because the model may answer on the next prompt.
  */
 async function serveWithFailover(
   candidates: ModelRow[],

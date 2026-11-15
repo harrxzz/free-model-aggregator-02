@@ -60,6 +60,34 @@ export interface ServedModel {
   display_name: string;
 }
 
+/**
+ * ANTHROPIC TRANSLATION (how the Messages wire is rewritten to Chat Completions and back)
+ *   Three of the six prompts arrive as Anthropic Messages requests, and the gateway only
+ *   speaks Chat Completions, so this file translates both ways. The request rewrite takes the
+ *   Anthropic system prompt (a string or an array of text blocks) and turns it into a Chat
+ *   Completions system message; it takes the Messages array and turns each entry into a Chat
+ *   Completions message, keeping the role and the content blocks. A text block becomes a text
+ *   content part; an image block becomes an image_url part with the base64 source the client
+ *   sent; a tool_use block becomes a tool_calls entry on an assistant message, with the tool's
+ *   name and its input serialised as the call's arguments; a tool_result block becomes a tool
+ *   message carrying the result, with the tool_use_id matched to the call it answers. The
+ *   tools the client declared become Chat Completions tools (name, description, input schema),
+ *   and the tool_choice becomes the Chat Completions tool_choice with the same semantics: auto,
+ *   any, none, or a named tool. The response rewrite takes the gateway's Chat Completions
+ *   answer and builds a Messages object: the model's text becomes a text block, a tool call
+ *   becomes a tool_use block with the same id, name, and input, the stop reason is translated
+ *   (tool_calls becomes tool_use, length becomes max_tokens, otherwise end_turn), and the usage
+ *   is carried over as input_tokens and output_tokens. A streaming answer is translated event
+ *   by event: message_start opens the message with the dialled model id, content_block_start
+ *   opens a text or tool_use block, content_block_delta carries the text or the input_json
+ *   fragment, content_block_stop closes the block, message_delta carries the stop reason and
+ *   the usage, and message_stop closes the message. The model field on every event is the
+ *   dialled id, never the provider's bare id, so the gateway record and the streamed answer
+ *   agree on which model served the prompt. One prompt (p05) declares tools, so the tool
+ *   translation is exercised in every trial; the other prompts carry no tools and the
+ *   translation passes them through unchanged.
+ */
+
 /** A fixed epoch second for every listed model's `created`: nothing in the reply reads the clock. */
 const FIXED_OPENAI_CREATED = 1767225600;
 /** A fixed instant for every listed model's `created_at`: nothing in the reply reads the clock. */

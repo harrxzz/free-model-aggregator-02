@@ -289,6 +289,22 @@ export function meetsRequirements(requires: Requirement, caps: Capabilities): bo
  * This baseline lists every free model in the brief — exactly the fourteen dialable ids the catalog
  * column scores — so keep it that way: register this set and keep GET /v1/models (both auth headers)
  * exactly that set, since listing fewer loses the column as surely as listing more.
+ *
+ * CATALOG RULES (what counts and what does not)
+ *   The catalog is the document `--list` prints and the entry POSTs to /register, byte for byte,
+ *   so the two must be built by the same function from the same brief. It carries one provider,
+ *   `openrouter`, with the public base URL `https://openrouter.ai/api/v1`, the key env
+ *   `OPENROUTER_API_KEY`, and the wire `openai`. Its models are the brief's free models, each
+ *   once, in the brief's order, with the gateway's id (`openrouter/<vendor>/<model>:free`), the
+ *   free flag true, and the context length the brief lists (or null when the brief does not say).
+ *   A duplicate id is listed once: the set deduplicates by id so a brief that names a model
+ *   twice does not list it twice. A paid row (the brief says `free: false`) is never listed,
+ *   because the catalog column scores exactly the fourteen dialable free ids and a paid id
+ *   would break the exact match. When the brief lists no free model at all the catalog carries
+ *   no providers, and the entrypoint has nothing to dial, so every prompt is refused. The
+ *   catalog's base_url is the provider's public endpoint, never the gateway's trial-local
+ *   address, because the gateway's origin differs between a live pass and its replay and the
+ *   catalog is part of the state export a replay must reproduce byte for byte.
  */
 export function buildCatalog(brief: Brief): CatalogReport {
   const seen = new Set<string>();
