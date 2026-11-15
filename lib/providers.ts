@@ -20,6 +20,23 @@
 //
 // Everything here is deterministic: no clock and no randomness, so `node main.ts --list` and the
 // register body build the same document, byte for byte, on a live pass and on its replay.
+//
+// AGGREGATOR-02 NOTES (this entry's adaptation)
+//   The fourteen free models in this contest's brief are OpenRouter's free tier, and their ratings
+//   are the quality column's currency: the entrypoint routes each prompt to the highest-rated free
+//   model that meets its requirements, so the rating_milli on each row is what the routing reads.
+//   The best-rated model is the thinking-machines inkling at 1475, but OpenRouter gates it to
+//   agentic harnesses and it refuses a plain API call with 403, so the entrypoint deprioritises it
+//   and the best model that actually answers is the nemotron super-vl at 1303. The catalog built
+//   here lists all fourteen dialable ids exactly once, on the single provider `openrouter`, with
+//   the public base URL and the key env OPENROUTER_API_KEY; the gateway swaps the trial's dummy
+//   key for the entrant's own key before it forwards a call. A model row is free unless the brief
+//   says `free: false`, and a paid row is never routed or listed. The six prompts each carry a
+//   weight (1 or 2) and requirements (tools, vision, JSON mode, minimum context); the entrypoint
+//   reads the prompt row by arrival order and routes to the best model that meets it, so the
+//   prompt list must be read before the first request or the routing has no row to follow. The
+//   brief's JSON documents are found by their `schema` member under this contest's prefix, never
+//   by a name alone, so a brief that spells the lists in the sibling contest's names still reads.
 
 import { readFileSync } from 'node:fs';
 

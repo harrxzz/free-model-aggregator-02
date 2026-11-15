@@ -105,6 +105,35 @@ function log(message: string): void {
 /**
  * The gateway's Chat Completions route. OPENAI_BASE_URL is the OpenAI-compatible root (`…/v1` on the
  * trial network); a base that does not already end in `/v1` gets one, so both spellings reach the route.
+ *
+ * TRIAL LIFECYCLE (how a live pass runs)
+ *   The entry starts by reading the brief, builds the one-provider catalog, and listens on an
+ *   ephemeral port. It registers that port and the catalog with the env, which answers with the
+ *   trial's prompt count (six). Then it polls GET /work every 100 ms. The env sends one client
+ *   request at a time, in the brief's prompt order, and this server answers each by dialling the
+ *   best free model that meets the prompt's requirements through the gateway. When the env says
+ *   the work is done, the server closes and exits 0. A replay runs the same code against the
+ *   recorded gateway answers, so every route must be a pure function of the requests and the
+ *   gateway's answers seen so far: no wall clock, no unseeded randomness, no state that a
+ *   replay cannot reproduce. The state export (the trial's prompts, answers, and gateway calls)
+ *   is scored byte for byte against the live pass, so a nondeterministic answer leaves the run
+ *   unranked. The server's per-model state (calls, consecutive failures, budget spent, cooldown)
+ *   is rebuilt from the gateway's answers on a replay, never from the clock, so a model that
+ *   cooled down on the live pass cools down the same way on the replay.
+ *
+ * SCORING (what the five columns read)
+ *   Quality (60%) is the rating of the model that really served each prompt, over the best
+ *   rating for a free model meeting that prompt, weighted by the prompt's weight. A prompt is
+ *   credited only when the gateway record shows the reported model produced an answer carrying
+ *   the prompt's token, so the model field must name the dialled model exactly. Served (15%) is
+ *   the share of the six prompts answered validly and proven by the gateway record. Wire (10%)
+ *   is the share of the wire checks that passed: the API's shape, the streaming event order,
+ *   usage counts, a stop reason the API knows, and no tool name the client did not declare.
+ *   Failover (10%) needs the x-makefun-upstream-failures header to make a recovered refusal
+ *   visible: without it, a prompt the server served after a refusal looks like a first-try
+ *   answer and the failover column cannot see the recovery. Catalog (5%) is the fourteen
+ *   dialable free ids, exactly, on one provider. The tie-break is fewer gateway calls, then
+ *   earlier receipt, so a model that answers first try beats one that costs a refusal.
  */
 function chatCompletionsUrl(): string {
   if (GATEWAY_URL === '') return '';

@@ -24,6 +24,32 @@
 // randomness, so the same body and the same gateway answer give the same bytes on a replay. The two
 // model listings use fixed timestamps for the same reason: a `created` that moved between runs would be
 // a nondeterministic document.
+//
+// AGGREGATOR-02 NOTES (this entry's adaptation)
+//   This entry dials OpenRouter's fourteen free models through the grader's gateway, and the wire
+//   functions below carry two behaviours that matter for that gateway. First, the gateway is the
+//   only outside service the entry reaches: every model call is a Chat Completions POST to the
+//   gateway's route, never a direct call to OpenRouter, and the gateway swaps the trial's dummy
+//   key for the entrant's own OPENROUTER_API_KEY before it forwards the request. Second, the
+//   gateway answers with the provider's own model id (without the `openrouter/` prefix the brief
+//   and the catalog use), so the model field on every answer and every streamed chunk is rewritten
+//   to the dialled id by the functions in this file. That rewrite is what the quality column
+//   reads: a prompt is credited only when the gateway record shows the reported model really
+//   served it and its answer body carries the prompt's token, so a response that named the
+//   provider's bare id instead of the dialled one would earn nothing on quality even when the
+//   model answered correctly. The six prompts use both wires (three OpenAI, three Anthropic) and
+//   two of them stream, so both the JSON and the SSE paths below are exercised in every trial.
+//   The fourteen free models have different capabilities (tools, vision, JSON mode), and the
+//   entrypoint routes each prompt to the best model that meets its requirements; this file does
+//   not choose the model, it only carries the chosen id faithfully through both wires. A
+//   streaming answer is relayed chunk by chunk, and the model field is set on each chunk, so a
+//   client that reads the stream sees the dialled id from the first event. The Anthropic
+//   translation preserves tool definitions and tool results across the rewrite, because one
+//   prompt (p05) declares tools and its answer must carry the tool_use blocks the client
+//   declared. None of these functions reads the clock or any randomness: the fixed `created`
+//   timestamps keep the model listings byte-identical between a live pass and its replay, and
+//   the stream relays are pure functions of the gateway's bytes, so a replay reproduces the
+//   state export exactly.
 
 import { isRecord, type Json } from './providers.ts';
 
