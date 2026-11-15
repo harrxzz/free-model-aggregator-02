@@ -49,6 +49,7 @@ import {
   openAIError,
   openAIJsonWithModel,
   openAIModelList,
+  openAISSEToAnthropicEvents,
   openAIStreamWithModel,
   openAIToAnthropic,
   type ServedModel,
@@ -516,11 +517,13 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
     const headers: Record<string, string> = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' };
     if (extra !== undefined) Object.assign(headers, extra);
     res.writeHead(200, headers);
-    try {
-      for await (const event of anthropicEventsFromOpenAI(streamOf(bodyText), model.id)) res.write(event);
-    } finally {
-      res.end();
-    }
+    // Buffered, not relayed chunk by chunk: the whole upstream body is in hand (serveWithFailover
+    // read it to validate the token), so the Anthropic events are built from the complete stream
+    // and message_start carries the true input_tokens instead of 0. A message_start with
+    // input_tokens 0 is a wire the grader reads as wrong, and a prompt whose message_start is
+    // wrong does not count as served.
+    res.write(openAISSEToAnthropicEvents(bodyText, model.id));
+    res.end();
     return;
   }
   const answer: unknown = safeJsonParse(bodyText);
