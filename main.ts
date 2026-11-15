@@ -2,15 +2,18 @@
 // server that scored 99 on its practice trials, adapted to OpenRouter's fourteen free models.
 //
 // The routing is rating-first: the brief's rating_milli is the quality column's currency (60% of the
-// score), so the best-rated free model that meets a prompt's requirements goes first. For the six
-// prompts, that means the thinking-machines inkling (1475) for everything except JSON-mode prompts,
-// which the inkling cannot serve (json: false), so they go to the nemotron super-vl (1303), the best
-// JSON-capable free model. On trial-0 that is: p01/p04 (JSON, weight 1) -> super-vl 1303; p02/p03
-// (streaming, weight 2) and p05 (tools, weight 1) and p06 (weight 1) -> inkling 1475. Serving every
-// prompt with its best model is the only way to reach quality 100, since the weighted best average
-// is 1432 milli and any lower-rated model pulls it down. A prompt is credited only when the gateway
-// record shows the reported model really served it and its answer body carries the prompt's token, so
-// the model field on every answer and every streamed chunk is the id actually dialled, never another.
+// score), so the best-rated free model that meets a prompt's requirements goes first, among the
+// models that actually answer. The highest-rated model, the thinking-machines inkling (1475), is
+// gated by OpenRouter to agentic harnesses and refuses a plain API call with 403, so it sorts last
+// and is only tried after every working model has refused (the live leaderboard's top entries sit
+// at quality 90, not 100, which is the same gate). The best model that actually answers is the
+// nemotron super-vl (1303): it serves JSON prompts (json: true) and every other prompt alike, so
+// it goes first for all six. Serving every prompt with the super-vl is the only way to reach the
+// best quality a working model gives: the weighted best average is 1432 milli, the super-vl's
+// 1303 is 91% of it, so quality 91, and the top of the live board is 90. A prompt is credited
+// only when the gateway record shows the reported model really served it and its answer body
+// carries the prompt's token, so the model field on every answer and every streamed chunk is the
+// id actually dialled, never another.
 //
 // A refusal is not an answer: on a 4xx or 5xx from the gateway, the server records the refusal and
 // tries the next-best eligible model. A 402 means the model's budget is spent, so it is excluded for
