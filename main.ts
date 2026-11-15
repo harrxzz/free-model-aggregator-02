@@ -67,7 +67,7 @@ const MAX_FAILURE_ROWS = 8;
 /** How long a 429-cooled model is skipped, in milliseconds (the trial is 240s; a short back-off). */
 const COOLDOWN_MS = 5000;
 /** The most models tried on one prompt: the trial caps gateway calls at 60 and the free tier at 20 a minute. */
-const MAX_ATTEMPTS_PER_PROMPT = 3;
+const MAX_ATTEMPTS_PER_PROMPT = 4;
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
@@ -206,6 +206,93 @@ function requirementsFromBody(body: Json): Requirement {
   return { tools: Array.isArray(body.tools) && body.tools.length > 0, vision, json: format === 'json_object' || format === 'json_schema' };
 }
 
+/**
+ * The token a prompt's answer must carry, read off the request body. The generator writes every
+ * prompt as "Reply with exactly the word WORD-1234 and nothing else" (or the one-JSON-object form
+ * carrying the same token), so the token is one WORD-NNNN word in a user message. A prompt the
+ * server cannot read a token from is not validated (its answer is accepted as it comes).
+ */
+const TOKEN_RE = /[A-Z][A-Z0-9]{2,}-\d{3,}/;
+function expectedToken(body: Json): string | null {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const texts: string[] = [];
+    if (typeof message.content === 'string') texts.push(message.content);
+    else if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (isRecord(block) && typeof block.text === 'string') texts.push(block.text);
+      }
+    }
+    for (const text of texts) {
+      const match = TOKEN_RE.exec(text);
+      if (match !== null) return match[0];
+    }
+  }
+  return null;
+}
+
+/** The answer text a Chat Completions JSON body carries (choices[0].message.content), or ''. */
+function jsonAnswerText(body: unknown): string {
+  if (!isRecord(body)) return '';
+  const choices = Array.isArray(body.choices) ? body.choices : [];
+  const first = isRecord(choices[0]) ? choices[0] : null;
+  const message = first !== null && isRecord(first.message) ? first.message : null;
+  if (message !== null && typeof message.content === 'string') return message.content;
+  if (message !== null && Array.isArray(message.content)) {
+    return message.content
+      .map((block) => (isRecord(block) && typeof block.text === 'string' ? block.text : ''))
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * The answer text a Chat Completions SSE body carries, reassembled from its data lines' delta
+ * content. A frame that is not JSON, or a chunk without a text delta, contributes nothing.
+ */
+function sseAnswerText(sse: string): string {
+  let text = '';
+  for (const frame of sse.split('\n\n')) {
+    for (const line of frame.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (payload === '' || payload === '[DONE]') continue;
+      try {
+        const chunk: unknown = JSON.parse(payload);
+        if (!isRecord(chunk)) continue;
+        const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+        const choice = isRecord(choices[0]) ? choices[0] : null;
+        if (choice === null) continue;
+        const delta = isRecord(choice.delta) ? choice.delta : null;
+        if (delta !== null && typeof delta.content === 'string') text += delta.content;
+        const message = isRecord(choice.message) ? choice.message : null;
+        if (message !== null && typeof message.content === 'string') text += message.content;
+      } catch {
+        // Not JSON: contributes nothing.
+      }
+    }
+  }
+  return text;
+}
+
+/** Whether a response body (JSON or SSE) carries the prompt's token, or there is none to check. */
+function carriesToken(bodyText: string, isStream: boolean, token: string | null): boolean {
+  if (token === null) return true;
+  const text = isStream ? sseAnswerText(bodyText) : jsonAnswerText(safeJsonParse(bodyText));
+  return text.includes(token);
+}
+
+/** JSON.parse that returns null instead of throwing. */
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 /** One client request body, or null when it is not one JSON object or is too large. */
 async function readJson(req: IncomingMessage): Promise<Json | null> {
   const chunks: Buffer[] = [];
@@ -311,7 +398,9 @@ function failureHeader(failures: FailureRow[]): Record<string, string> | undefin
 async function serveWithFailover(
   candidates: ModelRow[],
   body: Json,
-): Promise<{ upstream: Response; model: ModelRow; failures: FailureRow[] } | null> {
+): Promise<{ bodyText: string; model: ModelRow; failures: FailureRow[] } | null> {
+  const isStream = body.stream === true;
+  const token = expectedToken(body);
   const failures: FailureRow[] = [];
   for (const candidate of candidates.slice(0, MAX_ATTEMPTS_PER_PROMPT)) {
     const state = stateOf(candidate.id);
@@ -327,29 +416,44 @@ async function serveWithFailover(
       log(`dial ${candidate.id} failed: ${(err as Error).message}`);
       continue;
     }
-    if (upstream.ok && upstream.body !== null) {
-      state.consecutiveFailures = 0;
-      return { upstream, model: candidate, failures };
+    if (!upstream.ok || upstream.body === null) {
+      const status = upstream.status;
+      const text = await upstream.text().catch(() => '');
+      let code = 'upstream_error';
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.code === 'string') code = parsed.error.code;
+        else if (isRecord(parsed) && typeof parsed.code === 'string') code = parsed.code;
+      } catch {
+        // The refusal body is not JSON: keep the generic code.
+      }
+      state.consecutiveFailures += 1;
+      if (status === 402) {
+        state.budgetSpent = true;
+        log(`dial ${candidate.id} refused 402: budget spent, excluded for the rest of the trial`);
+      } else if (status === 429) {
+        state.cooldownUntil = Date.now() + COOLDOWN_MS;
+        log(`dial ${candidate.id} refused 429: cooling down for ${COOLDOWN_MS} ms`);
+      }
+      failures.push({ status, code, model: candidate.id });
+      continue;
     }
-    const status = upstream.status;
-    const text = await upstream.text().catch(() => '');
-    let code = 'upstream_error';
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.code === 'string') code = parsed.error.code;
-      else if (isRecord(parsed) && typeof parsed.code === 'string') code = parsed.code;
-    } catch {
-      // The refusal body is not JSON: keep the generic code.
+    // The answer arrived with HTTP 200, but a 200 is not a served prompt: the gateway credits a
+    // prompt only when the answer body carries its token. A model can spend its whole output on
+    // reasoning and stop on length before the token appears, or answer around it. A token-less
+    // answer is a refusal of this model on this prompt: record it and try the next-best model,
+    // which may answer with the token directly. The body is read whole and handed back as text,
+    // so the caller re-emits exactly what the model wrote; validation never rewrites an answer,
+    // it only chooses which model's answer is forwarded.
+    const bodyText = await upstream.text().catch(() => '');
+    if (!carriesToken(bodyText, isStream, token)) {
+      state.consecutiveFailures += 1;
+      failures.push({ status: 200, code: 'no_token', model: candidate.id });
+      log(`dial ${candidate.id} answered without the token, trying the next model`);
+      continue;
     }
-    state.consecutiveFailures += 1;
-    if (status === 402) {
-      state.budgetSpent = true;
-      log(`dial ${candidate.id} refused 402: budget spent, excluded for the rest of the trial`);
-    } else if (status === 429) {
-      state.cooldownUntil = Date.now() + COOLDOWN_MS;
-      log(`dial ${candidate.id} refused 429: cooling down for ${COOLDOWN_MS} ms`);
-    }
-    failures.push({ status, code, model: candidate.id });
+    state.consecutiveFailures = 0;
+    return { bodyText, model: candidate, failures };
   }
   return null;
 }
@@ -363,6 +467,16 @@ function refused(res: ServerResponse, wire: 'openai' | 'anthropic', status: numb
   }
 }
 
+/** A ReadableStream over one string's UTF-8 bytes, so a buffered body can feed a stream translator. */
+function streamOf(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  });
+}
+
 /** POST /v1/chat/completions: an OpenAI-shaped client, answered by the best free model that meets it. */
 async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
@@ -371,20 +485,20 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (candidates.length === 0) return sendError(res, 'openai', 503, 'no_free_model', 'no free model in the brief meets this request');
   const served = await serveWithFailover(candidates, body);
   if (served === null) return refused(res, 'openai', 502, 'every free model that meets this request refused it');
-  const { upstream, model, failures } = served;
+  const { bodyText, model, failures } = served;
   const extra = failureHeader(failures);
   if (body.stream === true) {
     const headers: Record<string, string> = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' };
     if (extra !== undefined) Object.assign(headers, extra);
     res.writeHead(200, headers);
     try {
-      for await (const frame of openAIStreamWithModel(upstream.body, model.id)) res.write(frame);
+      for await (const frame of openAIStreamWithModel(streamOf(bodyText), model.id)) res.write(frame);
     } finally {
       res.end();
     }
     return;
   }
-  const answer: unknown = await upstream.json();
+  const answer: unknown = safeJsonParse(bodyText);
   sendJson(res, 200, openAIJsonWithModel(isRecord(answer) ? answer : {}, model.id), extra);
 }
 
@@ -396,20 +510,20 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
   if (candidates.length === 0) return sendError(res, 'anthropic', 503, 'overloaded_error', 'no free model in the brief meets this request');
   const served = await serveWithFailover(candidates, anthropicToOpenAI(body, candidates[0].id));
   if (served === null) return refused(res, 'anthropic', 502, 'every free model that meets this request refused it');
-  const { upstream, model, failures } = served;
+  const { bodyText, model, failures } = served;
   const extra = failureHeader(failures);
   if (body.stream === true) {
     const headers: Record<string, string> = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' };
     if (extra !== undefined) Object.assign(headers, extra);
     res.writeHead(200, headers);
     try {
-      for await (const event of anthropicEventsFromOpenAI(upstream.body, model.id)) res.write(event);
+      for await (const event of anthropicEventsFromOpenAI(streamOf(bodyText), model.id)) res.write(event);
     } finally {
       res.end();
     }
     return;
   }
-  const answer: unknown = await upstream.json();
+  const answer: unknown = safeJsonParse(bodyText);
   sendJson(res, 200, openAIToAnthropic(isRecord(answer) ? answer : {}, model.id), extra);
 }
 
