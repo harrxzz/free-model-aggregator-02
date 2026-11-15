@@ -437,7 +437,20 @@ function listen(server: Server): Promise<void> {
   });
 }
 
-/** POST /register with the port and the one catalog; the env answers with the trial's prompt count. */
+/** POST /register with the port and the one catalog; the env answers with the trial's prompt count.
+ *
+ * REGISTER (the handshake that starts a trial)
+ *   The entry registers once, right after it starts listening, and the env answers with the
+ *   number of prompts the trial holds (six for this contest). The register body carries the
+ *   protocol version, the port the entry listens on, and the one-provider catalog built from
+ *   the brief. The env checks the catalog against the brief's fourteen free ids before it
+ *   sends the first prompt: a catalog that lists a paid model, or that omits a free one, is
+ *   refused at registration and the trial never starts. The register call times out after
+ *   five seconds, so an env that does not answer in time fails the entry rather than leaving
+ *   it hanging. A successful register is the only way the trial begins; the entry does not
+ *   serve a client request before it has registered, because the env sends prompts only to
+ *   entries it has registered.
+ */
 async function register(port: number, report: CatalogReport): Promise<void> {
   const res = await fetch(`${ENV_URL}/register`, {
     method: 'POST',
